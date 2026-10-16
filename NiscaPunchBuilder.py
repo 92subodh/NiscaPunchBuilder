@@ -21,6 +21,14 @@ def draw_polygon_yz(sketch: adsk.fusion.Sketch, wx: float, yz_points: list):
     for i in range(len(pts)):
         lines.addByTwoPoints(pts[i], pts[(i + 1) % len(pts)])
 
+def get_profile_with_loops(sketch: adsk.fusion.Sketch, expected_loops: int) -> adsk.fusion.Profile:
+    """Find the sketch profile with the specified number of loops (e.g., 2 for a ring with 1 hole)."""
+    for i in range(sketch.profiles.count):
+        prof = sketch.profiles.item(i)
+        if prof.profileLoops.count == expected_loops:
+            return prof
+    return sketch.profiles.item(0)
+
 def create_color(design: adsk.fusion.Design, name: str, r: int, g: int, b: int, opacity: int = 255):
     """Safely create or retrieve a custom appearance color across all Fusion versions."""
     try:
@@ -111,7 +119,7 @@ def add_point(comp: adsk.fusion.Component, wx: float, wy: float, wz: float, name
     return cp
 
 def add_cyl_x(comp: adsk.fusion.Component, x_start: float, length_x: float, wy: float, wz: float, radius: float, name: str, color, opacity: float = 1.0):
-    """Create a cylinder along the World X-axis centered at World (wy, wz)."""
+    """Create a solid cylinder along the World X-axis centered at World (wy, wz)."""
     pl = offset_plane(comp, comp.yZConstructionPlane, x_start)
     sk = comp.sketches.add(pl)
     sk.sketchCurves.sketchCircles.addByCenterRadius(w2s(sk, x_start, wy, wz), mm(radius))
@@ -121,14 +129,21 @@ def add_cyl_x(comp: adsk.fusion.Component, x_start: float, length_x: float, wy: 
     apply_color(body, color, opacity)
     return body
 
-def add_tube_x(comp: adsk.fusion.Component, x_start: float, length_x: float, wy: float, wz: float, r_outer: float, r_inner: float, name: str, color, opacity: float = 1.0):
-    """Create a hollow tube along the World X-axis by extruding outer cylinder then cutting inner bore."""
-    body = add_cyl_x(comp, x_start, length_x, wy, wz, r_outer, name, color, opacity)
-    pl_cut = offset_plane(comp, comp.yZConstructionPlane, x_start - 0.5)
-    sk_cut = comp.sketches.add(pl_cut)
-    sk_cut.sketchCurves.sketchCircles.addByCenterRadius(w2s(sk_cut, x_start - 0.5, wy, wz), mm(r_inner))
-    extrude_profile(comp, sk_cut.profiles.item(0), length_x + 1.0, adsk.fusion.FeatureOperations.CutFeatureOperation)
-    return body
+def add_ring_x(comp: adsk.fusion.Component, x_start: float, length_x: float, out_y: float, out_z: float, r_outer: float, in_y: float, in_z: float, r_inner: float, name: str, color, operation=adsk.fusion.FeatureOperations.NewBodyFeatureOperation):
+    """Create a concentric or eccentric ring along X without using CutFeatureOperation."""
+    pl = offset_plane(comp, comp.yZConstructionPlane, x_start)
+    sk = comp.sketches.add(pl)
+    sk.sketchCurves.sketchCircles.addByCenterRadius(w2s(sk, x_start, out_y, out_z), mm(r_outer))
+    sk.sketchCurves.sketchCircles.addByCenterRadius(w2s(sk, x_start, in_y, in_z), mm(r_inner))
+    ring_prof = get_profile_with_loops(sk, 2)
+    ext = extrude_profile(comp, ring_prof, length_x, operation)
+    if ext.bodies.count > 0:
+        body = ext.bodies.item(0)
+        if operation == adsk.fusion.FeatureOperations.NewBodyFeatureOperation:
+            body.name = name
+        apply_color(body, color)
+        return body
+    return None
 
 def add_box_x(comp: adsk.fusion.Component, x_start: float, length_x: float, y1: float, z1: float, y2: float, z2: float, name: str, color, opacity: float = 1.0):
     """Create a rectangular box extruded along the World X-axis."""
@@ -235,8 +250,8 @@ def run(context):
         col_tray_dark = create_color(design, 'Nisca_Tray_Charcoal', 48, 52, 58)
         col_chute_guide = create_color(design, 'Nisca_Chute_Silver', 160, 168, 175)
         col_black = create_color(design, 'Nisca_Black_Roller', 30, 33, 38)
-        col_blue_cam = create_color(design, 'Nisca_Highlight_Blue', 78, 138, 205)
-        col_blue_rotor = create_color(design, 'Nisca_Highlight_Blue_Light', 105, 162, 225)
+        col_blue_cam = create_color(design, 'Nisca_Highlight_Blue', 72, 132, 202)
+        col_blue_rotor = create_color(design, 'Nisca_Highlight_Blue_Light', 110, 168, 230)
         col_coupler_blue = create_color(design, 'Nisca_Coupler_Anodized', 35, 115, 210)
         col_white = create_color(design, 'Nisca_White_Roller', 242, 242, 246)
         col_pcb_green = create_color(design, 'Nisca_Sensor_PCB', 22, 145, 58)
@@ -250,8 +265,8 @@ def run(context):
         punch_x_coords = [-120.0, -40.0, 40.0, 120.0]
         sensor_x_coords = [-80.0, 0.0, 80.0]
 
-        Z_SHAFT = 49.0        # Fixed height of the off-center rotating drive shaft (Y = 0)
-        ECCENTRICITY = 4.0    # Off-center distance between shaft axis and cam rotor center (stroke = 2*e = 8.0 mm)
+        Z_SHAFT = 49.0        # Fixed height of the continuous off-center rotating drive shaft (Y = 0)
+        ECCENTRICITY = 4.0    # Off-center distance between shaft axis and stepped flange center (stroke = 2*e = 8.0 mm)
         Z_CAM_TDC = Z_SHAFT + ECCENTRICITY  # 53.0 mm at Top Dead Center (theta = 0)
         Z_WRIST_TDC = 34.0    # Clevis wrist pin height at Top Dead Center
         L_STRAP = Z_CAM_TDC - Z_WRIST_TDC   # 19.0 mm center-to-center length of the clevis strap
@@ -284,20 +299,20 @@ def run(context):
             add_cyl_x(rollers_comp, rx, 36.0, -55.0, 11.0, 11.0, f'White_Switchback_Roller_{int(rx)}', col_white)
             add_cyl_x(rollers_comp, rx, 36.0, -55.0, -11.0, 11.0, f'Black_Pinch_Roller_{int(rx)}', col_black)
 
-        pl_throat = offset_plane(rollers_comp, rollers_comp.yZConstructionPlane, -135.0)
+        pl_throat = offset_plane(rollers_comp, rollers_comp.yZConstructionPlane, -155.0)
         sk_throat = rollers_comp.sketches.add(pl_throat)
-        draw_polygon_yz(sk_throat, -135.0, [(-41.0, 4.5), (-15.0, 4.5), (-15.0, 6.5), (-41.0, 6.5)])
-        draw_polygon_yz(sk_throat, -135.0, [(-41.0, -6.5), (-15.0, -6.5), (-15.0, -4.5), (-41.0, -4.5)])
+        draw_polygon_yz(sk_throat, -155.0, [(-41.0, 4.5), (-15.0, 4.5), (-15.0, 6.5), (-41.0, 6.5)])
+        draw_polygon_yz(sk_throat, -155.0, [(-41.0, -6.5), (-15.0, -6.5), (-15.0, -4.5), (-41.0, -4.5)])
         for i, gname in enumerate(['Upper_Throat_Guide', 'Lower_Throat_Guide']):
-            ext_g = extrude_profile(rollers_comp, sk_throat.profiles.item(i), 270.0)
+            ext_g = extrude_profile(rollers_comp, sk_throat.profiles.item(i), 310.0)
             ext_g.bodies.item(0).name = gname
             apply_color(ext_g.bodies.item(0), col_chute_guide, opacity=0.55)
 
-        add_cyl_x(rollers_comp, -140.0, 352.0, -82.0, 4.0, 2.0, 'Diverter_Pivot_Shaft', col_steel)
-        pl_div = offset_plane(rollers_comp, rollers_comp.yZConstructionPlane, -130.0)
+        add_cyl_x(rollers_comp, -160.0, 372.0, -82.0, 4.0, 2.0, 'Diverter_Pivot_Shaft', col_steel)
+        pl_div = offset_plane(rollers_comp, rollers_comp.yZConstructionPlane, -150.0)
         sk_div = rollers_comp.sketches.add(pl_div)
-        draw_polygon_yz(sk_div, -130.0, [(-82.0, 5.5), (-66.0, -1.5), (-68.0, -3.5), (-83.0, 2.5)])
-        ext_div = extrude_profile(rollers_comp, sk_div.profiles.item(0), 260.0)
+        draw_polygon_yz(sk_div, -150.0, [(-82.0, 5.5), (-66.0, -1.5), (-68.0, -3.5), (-83.0, 2.5)])
+        ext_div = extrude_profile(rollers_comp, sk_div.profiles.item(0), 300.0)
         ext_div.bodies.item(0).name = 'OneWay_Switchback_Diverter_Gate'
         apply_color(ext_div.bodies.item(0), col_diverter_orange)
 
@@ -333,96 +348,79 @@ def run(context):
             )
             extrude_profile(slide_comp, sk_bb.profiles.item(0), 30.0, adsk.fusion.FeatureOperations.JoinFeatureOperation)
 
-        # 4 Metallic Chrome Square Guide Blocks (matching close-up images 1-5)
+        # 4 Metallic Chrome Square Guide Blocks with central pin bore (drawn as 2-loop profiles without CutFeatureOperation)
         pl_top = offset_plane(slide_comp, slide_comp.xYConstructionPlane, 10.0)
-        sk_blocks = slide_comp.sketches.add(pl_top)
-        for px in punch_x_coords:
-            sk_blocks.sketchCurves.sketchLines.addTwoPointRectangle(
-                w2s(sk_blocks, px - 8.5, -8.5, 10.0),
-                w2s(sk_blocks, px + 8.5, 8.5, 10.0)
+        for idx, px in enumerate(punch_x_coords):
+            sk_blk = slide_comp.sketches.add(pl_top)
+            sk_blk.sketchCurves.sketchLines.addTwoPointRectangle(
+                w2s(sk_blk, px - 8.5, -8.5, 10.0),
+                w2s(sk_blk, px + 8.5, 8.5, 10.0)
             )
-        for i in range(sk_blocks.profiles.count):
-            ext_blk = extrude_profile(slide_comp, sk_blocks.profiles.item(i), 13.0, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+            sk_blk.sketchCurves.sketchCircles.addByCenterRadius(w2s(sk_blk, px, 0.0, 10.0), mm(3.8))
+            prof_blk = get_profile_with_loops(sk_blk, 2)
+            ext_blk = extrude_profile(slide_comp, prof_blk, 13.0, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
             blk_body = ext_blk.bodies.item(0)
-            blk_body.name = f'Chrome_Punch_Guide_Block_{i + 1}'
-            apply_color(blk_body, col_blue_rotor if i == 2 else col_chrome)
+            blk_body.name = f'Chrome_Punch_Guide_Block_{idx + 1}'
+            apply_color(blk_body, col_blue_rotor if idx == 2 else col_chrome)
 
-        # Top circular boss collar on each Square Guide Block (Z = 23.0 to 24.5 mm)
-        pl_boss = offset_plane(slide_comp, slide_comp.xYConstructionPlane, 23.0)
-        sk_boss = slide_comp.sketches.add(pl_boss)
-        for px in punch_x_coords:
+            # Top circular boss collar on each Square Guide Block (Z = 23.0 to 24.5 mm)
+            pl_boss = offset_plane(slide_comp, slide_comp.xYConstructionPlane, 23.0)
+            sk_boss = slide_comp.sketches.add(pl_boss)
             sk_boss.sketchCurves.sketchCircles.addByCenterRadius(w2s(sk_boss, px, 0.0, 23.0), mm(5.6))
-        for i in range(sk_boss.profiles.count):
-            extrude_profile(slide_comp, sk_boss.profiles.item(i), 1.5, adsk.fusion.FeatureOperations.JoinFeatureOperation)
-
-        # Cut 4 Vertical Punch & Die Bores (Dia 7.6 mm) through Guide Blocks and C-Channel Die at Y = 0
-        pl_cut = offset_plane(slide_comp, slide_comp.xYConstructionPlane, -15.0)
-        sk_holes = slide_comp.sketches.add(pl_cut)
-        for px in punch_x_coords:
-            sk_holes.sketchCurves.sketchCircles.addByCenterRadius(w2s(sk_holes, px, 0.0, -15.0), mm(3.8))
-        for i in range(sk_holes.profiles.count):
-            extrude_profile(slide_comp, sk_holes.profiles.item(i), 45.0, adsk.fusion.FeatureOperations.CutFeatureOperation)
-
-        # Cut 3 Rear Windows through the back of the C-Channel for the Position-Check Levers
-        pl_slot = offset_plane(slide_comp, slide_comp.xYConstructionPlane, -4.0)
-        sk_slot = slide_comp.sketches.add(pl_slot)
-        for sx in sensor_x_coords:
-            sk_slot.sketchCurves.sketchLines.addTwoPointRectangle(
-                w2s(sk_slot, sx - 5.0, 6.0, -4.0),
-                w2s(sk_slot, sx + 5.0, 18.0, -4.0)
-            )
-        for i in range(sk_slot.profiles.count):
-            extrude_profile(slide_comp, sk_slot.profiles.item(i), 12.0, adsk.fusion.FeatureOperations.CutFeatureOperation)
+            sk_boss.sketchCurves.sketchCircles.addByCenterRadius(w2s(sk_boss, px, 0.0, 23.0), mm(3.8))
+            prof_boss = get_profile_with_loops(sk_boss, 2)
+            ext_boss = extrude_profile(slide_comp, prof_boss, 1.5, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+            ext_boss.bodies.item(0).name = f'Guide_Block_Collar_{idx + 1}'
+            apply_color(ext_boss.bodies.item(0), col_blue_rotor if idx == 2 else col_chrome)
 
         # =====================================================================
-        # 4A. OFF-CENTER DRIVE SHAFT, 4 STEPPED ECCENTRIC CAM ROTORS & BULL GEAR
+        # 4A. ONE-PIECE CONTINUOUS DRIVE SHAFT & FIXED STEPPED ECCENTRIC FLANGES
         # =====================================================================
         cam_occ = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
         cam_comp = cam_occ.component
-        cam_comp.name = '04A_OffCenter_Shaft_And_Eccentric_Rotors'
+        cam_comp.name = '04A_Continuous_Shaft_And_Stepped_Flanges'
 
-        # Main Rotating Drive Shaft along X at (Y = 0, Z = 49.0 mm), Dia 8.0 mm (Radius 4.0 mm)
-        add_cyl_x(cam_comp, -174.0, 358.0, 0.0, Z_SHAFT, 4.0, 'Upper_OffCenter_Drive_Shaft', col_steel)
+        # 1) Single, unbroken, continuous cylindrical steel rod from X = -175 to +182 mm at (Y = 0, Z = 49.0 mm)
+        add_cyl_x(cam_comp, -175.0, 357.0, 0.0, Z_SHAFT, 4.0, 'Upper_OffCenter_Drive_Shaft', col_steel)
 
-        # 4 Stepped Eccentric Cam Rotors keyed off-center onto the Drive Shaft
-        # At Top Dead Center (theta = 0), rotor center is at (Y = 0, Z = 53.0 mm) -> +4.0 mm above the shaft!
+        # 2) 4 Fixed Eccentric Stepped Cam Flanges mounted around the continuous shaft (NO cuts on the shaft!)
+        # At Top Dead Center (theta = 0), each Stepped Flange center is at (Y = 0, Z = 53.0 mm), while its shaft bore is at (Y = 0, Z = 49.0 mm)
         for idx, px in enumerate(punch_x_coords):
             rotor_color = col_blue_rotor if idx == 2 else col_dark_cam
 
-            # 1) Inner Bearing Journal inside the Clevis Strap Ring: X = px-5.5 to px+4.5 mm (width 10 mm), R = 11.5 mm
-            journal = add_cyl_x(cam_comp, px - 5.5, 10.0, 0.0, Z_CAM_TDC, 11.5, f'Eccentric_Cam_Journal_{idx + 1}', rotor_color)
-
-            # 2) Stepped Front Flange on +X side: X = px+4.5 to px+10.0 mm (width 5.5 mm), R = 11.5 mm
-            flange = add_cyl_x(cam_comp, px + 4.5, 5.5, 0.0, Z_CAM_TDC, 11.5, f'Eccentric_Stepped_Flange_{idx + 1}', rotor_color)
-
-            # 3) Cut the horizontal U-slot on the Stepped Front Flange where the off-center shaft passes through (matching screenshots!)
-            pl_uslot = offset_plane(cam_comp, cam_comp.yZConstructionPlane, px + 4.4)
-            sk_uslot = cam_comp.sketches.add(pl_uslot)
-            sk_uslot.sketchCurves.sketchLines.addTwoPointRectangle(
-                w2s(sk_uslot, px + 4.4, -14.0, Z_SHAFT - 4.1),
-                w2s(sk_uslot, px + 4.4, 2.0, Z_SHAFT + 4.1)
+            # Part A: Cylindrical Bearing Journal (X = px - 6.0 to px + 4.0 mm, width 10.0 mm, R_out = 11.5 mm, R_shaft_bore = 4.0 mm)
+            # The Clevis Strap Ring rides freely on this cylindrical journal!
+            add_ring_x(
+                cam_comp, px - 6.0, 10.0,
+                0.0, Z_CAM_TDC, 11.5,
+                0.0, Z_SHAFT, 4.0,
+                f'Eccentric_Cam_Journal_{idx + 1}', rotor_color,
+                adsk.fusion.FeatureOperations.NewBodyFeatureOperation
             )
-            extrude_profile(cam_comp, sk_uslot.profiles.item(0), 6.0, adsk.fusion.FeatureOperations.CutFeatureOperation)
 
-            # 4) Cut the molded front pocket recess on the +X face of the Stepped Flange (matching screenshots!)
-            pl_pock = offset_plane(cam_comp, cam_comp.yZConstructionPlane, px + 8.2)
-            sk_pock = cam_comp.sketches.add(pl_pock)
-            sk_pock.sketchCurves.sketchCircles.addByCenterRadius(w2s(sk_pock, px + 8.2, 0.0, Z_CAM_TDC + 1.5), mm(7.2))
-            extrude_profile(cam_comp, sk_pock.profiles.item(0), 2.5, adsk.fusion.FeatureOperations.CutFeatureOperation)
-
-            # 5) Cross-Pin Locking Hole on the shaft at X = px + 6.5 mm (visible in all 5 close-up frames!)
-            pl_pinhole = offset_plane(cam_comp, cam_comp.xZConstructionPlane, -10.0)
-            sk_pinhole = cam_comp.sketches.add(pl_pinhole)
-            sk_pinhole.sketchCurves.sketchCircles.addByCenterRadius(
-                w2s(sk_pinhole, px + 6.5, -10.0, Z_SHAFT), mm(1.3)
+            # Part B: Stepped Retaining Flange Shoulder on +X side (X = px + 4.0 to px + 8.5 mm, width 4.5 mm, R_out = 13.8 mm, R_shaft_bore = 4.0 mm)
+            add_ring_x(
+                cam_comp, px + 4.0, 4.5,
+                0.0, Z_CAM_TDC, 13.8,
+                0.0, Z_SHAFT, 4.0,
+                f'Eccentric_Stepped_Flange_{idx + 1}', rotor_color,
+                adsk.fusion.FeatureOperations.NewBodyFeatureOperation
             )
-            extrude_profile(cam_comp, sk_pinhole.profiles.item(0), 20.0, adsk.fusion.FeatureOperations.CutFeatureOperation)
 
-        # 28-Tooth Driven Bull Gear keyed to the right end of the Off-Center Cam Shaft (X = +173..+180 mm)
+            # Part C: Subtle Rear Retaining Collar on -X side (X = px - 7.5 to px - 6.0 mm, width 1.5 mm, R_out = 12.8 mm, R_shaft_bore = 4.0 mm)
+            add_ring_x(
+                cam_comp, px - 7.5, 1.5,
+                0.0, Z_CAM_TDC, 12.8,
+                0.0, Z_SHAFT, 4.0,
+                f'Eccentric_Rear_Lip_{idx + 1}', rotor_color,
+                adsk.fusion.FeatureOperations.NewBodyFeatureOperation
+            )
+
+        # 3) 28-Tooth Driven Bull Gear keyed to the right end of the Continuous Drive Shaft (X = +173..+180 mm)
         add_spur_gear_x(cam_comp, 173.0, 7.0, 0.0, Z_SHAFT, 20.0, 28, 'Cam_Shaft_Driven_Bull_Gear', col_brass_gear, col_steel)
 
         # =====================================================================
-        # 4B. OUTER ECCENTRIC CLEVIS STRAPS (Collar Ring + 2 Bottom Fork Ears)
+        # 4B. FREE-MOVING ECCENTRIC CLEVIS STRAP RINGS (Ride on Stepped Flange Journal)
         # =====================================================================
         strap_occ = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
         strap_comp = strap_occ.component
@@ -431,31 +429,32 @@ def run(context):
         for idx, px in enumerate(punch_x_coords):
             strap_color = col_blue_cam if idx == 2 else col_dark_cam
 
-            # Upper Circular Strap Ring wrapping around the Eccentric Cam Journal (R_out = 15.0 mm, R_in = 11.55 mm)
-            # Spans X = px - 5.5 to px + 4.5 mm (width 10.0 mm)
-            add_tube_x(strap_comp, px - 5.5, 10.0, 0.0, Z_CAM_TDC, 15.0, 11.55, f'Eccentric_Strap_Ring_{idx + 1}', strap_color)
+            # Upper Circular Strap Ring riding around the R=11.5mm Eccentric Cam Journal (X = px - 6.0 to px + 4.0 mm)
+            add_ring_x(
+                strap_comp, px - 6.0, 10.0,
+                0.0, Z_CAM_TDC, 15.0,
+                0.0, Z_CAM_TDC, 11.55,
+                f'Eccentric_Strap_Ring_{idx + 1}', strap_color,
+                adsk.fusion.FeatureOperations.NewBodyFeatureOperation
+            )
 
             # Two Bottom Clevis Fork Ears hanging down from the ring (Z = 40.5 down to 31.0 mm) straddling the Silver Punch Pin
-            # Left Ear: X = px - 5.5 to px - 3.0 mm | Right Ear: X = px + 2.0 to px + 4.5 mm
-            for ear_x, ear_side in [(px - 5.5, 'Left'), (px + 2.0, 'Right')]:
+            # Drawn with the Wrist Pin hole (R = 1.4 mm at Y = 0, Z = 34.0 mm) directly inside the sketch!
+            for ear_x, ear_side in [(px - 6.0, 'Left'), (px + 1.5, 'Right')]:
                 pl_ear = offset_plane(strap_comp, strap_comp.yZConstructionPlane, ear_x)
                 sk_ear = strap_comp.sketches.add(pl_ear)
                 draw_polygon_yz(sk_ear, ear_x, [
                     (-5.8, 40.5),
                     (5.8, 40.5),
-                    (3.8, 31.0),
-                    (-3.8, 31.0)
+                    (3.8, 30.8),
+                    (-3.8, 30.8)
                 ])
-                ext_ear = extrude_profile(strap_comp, sk_ear.profiles.item(0), 2.5)
+                sk_ear.sketchCurves.sketchCircles.addByCenterRadius(w2s(sk_ear, ear_x, 0.0, Z_WRIST_TDC), mm(1.4))
+                ear_prof = get_profile_with_loops(sk_ear, 2)
+                ext_ear = extrude_profile(strap_comp, ear_prof, 2.5, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
                 ear_body = ext_ear.bodies.item(0)
                 ear_body.name = f'Clevis_Fork_Ear_{idx + 1}_{ear_side}'
                 apply_color(ear_body, strap_color)
-
-            # Cut the Clevis Wrist-Pin Bore (Dia 2.8 mm) through both Fork Ears at (Y = 0, Z = 34.0 mm)
-            pl_wbore = offset_plane(strap_comp, strap_comp.yZConstructionPlane, px - 6.0)
-            sk_wbore = strap_comp.sketches.add(pl_wbore)
-            sk_wbore.sketchCurves.sketchCircles.addByCenterRadius(w2s(sk_wbore, px - 6.0, 0.0, Z_WRIST_TDC), mm(1.4))
-            extrude_profile(strap_comp, sk_wbore.profiles.item(0), 11.5, adsk.fusion.FeatureOperations.CutFeatureOperation)
 
         # =====================================================================
         # 5. VERTICAL SILVER PUNCH PINS & CLEVIS WRIST PINS (4 Stations)
@@ -464,7 +463,6 @@ def run(context):
         pins_comp = pins_occ.component
         pins_comp.name = '05_Vertical_Punch_Pins'
 
-        # Main cylindrical silver punch pins (Dia 7.4 mm, Z = +3.5 mm to +31.5 mm at TDC)
         pl_pin_base = offset_plane(pins_comp, pins_comp.xYConstructionPlane, 3.5)
         sk_pins = pins_comp.sketches.add(pl_pin_base)
         for px in punch_x_coords:
@@ -474,11 +472,9 @@ def run(context):
             ext_pin.bodies.item(0).name = f'Silver_Punch_Pin_{i + 1}'
             apply_color(ext_pin.bodies.item(0), col_chrome)
 
-        # Upper Clevis Tang on each Punch Pin (fits between the 2 Clevis Fork Ears, Z = 31.5 to 37.0 mm)
         for idx, px in enumerate(punch_x_coords):
-            add_box_x(pins_comp, px - 2.9, 4.8, -3.5, 31.5, 3.5, 37.0, f'Punch_Pin_Clevis_Tang_{idx + 1}', col_chrome)
-            # Horizontal Silver Wrist Pin (Dia 2.8 mm) joining the Clevis Fork Ears to the Punch Pin at Z = 34.0 mm
-            add_cyl_x(pins_comp, px - 5.6, 10.2, 0.0, Z_WRIST_TDC, 1.4, f'Clevis_Wrist_Pin_{idx + 1}', col_steel)
+            add_box_x(pins_comp, px - 3.3, 4.6, -3.5, 31.5, 3.5, 37.0, f'Punch_Pin_Clevis_Tang_{idx + 1}', col_chrome)
+            add_cyl_x(pins_comp, px - 6.2, 10.4, 0.0, Z_WRIST_TDC, 1.4, f'Clevis_Wrist_Pin_{idx + 1}', col_steel)
 
         # =====================================================================
         # 6. REAR PAPER POSITION & SKEW CHECK MECHANISM
@@ -522,104 +518,104 @@ def run(context):
 
         pl_lat = offset_plane(check_comp, check_comp.xYConstructionPlane, -4.5)
         sk_lat = check_comp.sketches.add(pl_lat)
-        sk_lat.sketchCurves.sketchCircles.addByCenterRadius(w2s(sk_lat, 105.0, 22.0, -4.5), mm(4.5))
+        sk_lat.sketchCurves.sketchCircles.addByCenterRadius(w2s(sk_lat, 148.5, 22.0, -4.5), mm(4.5))
         ext_lat = extrude_profile(check_comp, sk_lat.profiles.item(0), 3.0)
         ext_lat.bodies.item(0).name = 'Side_Edge_Optical_Sensor'
         apply_color(ext_lat.bodies.item(0), col_sensor_red)
 
         # =====================================================================
-        # 7. UPPER INPUT PAPER TRAY & PICK-UP ROLLER
+        # 7. UPPER INPUT PAPER TRAY & PICK-UP ROLLER (310 mm wide for 297 mm A4)
         # =====================================================================
         in_tray_occ = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
         in_tray_comp = in_tray_occ.component
         in_tray_comp.name = '07_Upper_Input_Tray_And_PickRoller'
 
-        pl_ut = offset_plane(in_tray_comp, in_tray_comp.yZConstructionPlane, -115.0)
+        pl_ut = offset_plane(in_tray_comp, in_tray_comp.yZConstructionPlane, -155.0)
         sk_ut = in_tray_comp.sketches.add(pl_ut)
-        draw_polygon_yz(sk_ut, -115.0, [
+        draw_polygon_yz(sk_ut, -155.0, [
             (-280.0, 20.0), (-115.0, 20.0), (-68.0, 1.0),
             (-68.0, 3.5), (-115.0, 23.0), (-280.0, 23.0)
         ])
-        ext_ut = extrude_profile(in_tray_comp, sk_ut.profiles.item(0), 230.0)
+        ext_ut = extrude_profile(in_tray_comp, sk_ut.profiles.item(0), 310.0)
         ext_ut.bodies.item(0).name = 'Upper_Input_Tray_Bed'
         apply_color(ext_ut.bodies.item(0), col_tray_dark)
 
-        for gx, gside in [(-115.0, 'Left'), (112.0, 'Right')]:
+        for gx, gside in [(-155.0, 'Left'), (152.0, 'Right')]:
             add_box_x(in_tray_comp, gx, 3.0, -275.0, 23.0, -120.0, 36.0, f'Upper_Tray_Side_Guide_{gside}', col_dark_frame)
 
-        add_cyl_x(in_tray_comp, -130.0, 358.0, -175.0, 37.0, 3.0, 'Pickup_Roller_Shaft', col_steel)
+        add_cyl_x(in_tray_comp, -160.0, 388.0, -175.0, 37.0, 3.0, 'Pickup_Roller_Shaft', col_steel)
         for prx in [-55.0, 25.0]:
             add_cyl_x(in_tray_comp, prx, 30.0, -175.0, 37.0, 11.5, f'Sheet_Pickup_Roller_{int(prx)}', col_black)
 
         # =====================================================================
-        # 8. LOWER OUTPUT TRAY & RETURN CHUTE
+        # 8. LOWER OUTPUT TRAY & RETURN CHUTE (310 mm wide for 297 mm A4)
         # =====================================================================
         out_tray_occ = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
         out_tray_comp = out_tray_occ.component
         out_tray_comp.name = '08_Lower_Output_Tray_And_Chute'
 
-        pl_lt = offset_plane(out_tray_comp, out_tray_comp.yZConstructionPlane, -120.0)
+        pl_lt = offset_plane(out_tray_comp, out_tray_comp.yZConstructionPlane, -155.0)
         sk_lt = out_tray_comp.sketches.add(pl_lt)
-        draw_polygon_yz(sk_lt, -120.0, [
+        draw_polygon_yz(sk_lt, -155.0, [
             (-68.0, -4.5), (-68.0, -7.5), (-125.0, -45.0), (-290.0, -45.0),
             (-290.0, -32.0), (-286.0, -32.0), (-286.0, -42.0), (-125.0, -42.0)
         ])
-        ext_lt = extrude_profile(out_tray_comp, sk_lt.profiles.item(0), 240.0)
+        ext_lt = extrude_profile(out_tray_comp, sk_lt.profiles.item(0), 310.0)
         ext_lt.bodies.item(0).name = 'Lower_Switchback_Output_Tray'
         apply_color(ext_lt.bodies.item(0), col_tray_dark)
 
-        pl_rc = offset_plane(out_tray_comp, out_tray_comp.yZConstructionPlane, -115.0)
+        pl_rc = offset_plane(out_tray_comp, out_tray_comp.yZConstructionPlane, -150.0)
         sk_rc = out_tray_comp.sketches.add(pl_rc)
-        draw_polygon_yz(sk_rc, -115.0, [(-80.0, -3.5), (-125.0, -33.0), (-125.0, -31.0), (-80.0, -1.5)])
-        ext_rc = extrude_profile(out_tray_comp, sk_rc.profiles.item(0), 230.0)
+        draw_polygon_yz(sk_rc, -150.0, [(-80.0, -3.5), (-125.0, -33.0), (-125.0, -31.0), (-80.0, -1.5)])
+        ext_rc = extrude_profile(out_tray_comp, sk_rc.profiles.item(0), 300.0)
         ext_rc.bodies.item(0).name = 'Lower_Return_Chute_Roof'
         apply_color(ext_rc.bodies.item(0), col_chute_guide, opacity=0.5)
 
         # =====================================================================
-        # 9. PAPER SHEETS AT ALL 3 STAGES
+        # 9. PAPER SHEETS AT ALL 3 STAGES (297 mm wide A4, Zero Cut Operations!)
         # =====================================================================
         paper_occ = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
         paper_comp = paper_occ.component
         paper_comp.name = '09_Paper_Flow_Stages'
 
+        # Stage 1: Input Stack in Upper Tray
         pl_p1 = offset_plane(paper_comp, paper_comp.xYConstructionPlane, 23.0)
         sk_p1 = paper_comp.sketches.add(pl_p1)
         sk_p1.sketchCurves.sketchLines.addTwoPointRectangle(
-            w2s(sk_p1, -105.0, -275.0, 23.0),
-            w2s(sk_p1, 105.0, -120.0, 23.0)
+            w2s(sk_p1, -148.5, -275.0, 23.0),
+            w2s(sk_p1, 148.5, -120.0, 23.0)
         )
         ext_p1 = extrude_profile(paper_comp, sk_p1.profiles.item(0), 2.5)
         ext_p1.bodies.item(0).name = 'Stage1_Upper_Tray_Paper_Stack'
         apply_color(ext_p1.bodies.item(0), col_paper)
 
+        # Stage 2: Sheet Registered Inside Punch Throat
         pl_p2 = offset_plane(paper_comp, paper_comp.xYConstructionPlane, -0.3)
         sk_p2 = paper_comp.sketches.add(pl_p2)
         sk_p2.sketchCurves.sketchLines.addTwoPointRectangle(
-            w2s(sk_p2, -105.0, -135.0, -0.3),
-            w2s(sk_p2, 105.0, 7.5, -0.3)
+            w2s(sk_p2, -148.5, -135.0, -0.3),
+            w2s(sk_p2, 148.5, 7.5, -0.3)
         )
         ext_p2 = extrude_profile(paper_comp, sk_p2.profiles.item(0), 0.6)
         ext_p2.bodies.item(0).name = 'Stage2_Sheet_At_Punch_Registration'
         apply_color(ext_p2.bodies.item(0), col_paper, opacity=0.85)
 
+        # Stage 3: Punched Sheet in Lower Output Tray (Rectangle + 4 Holes in same sketch -> 5 loops)
         pl_p3 = offset_plane(paper_comp, paper_comp.xYConstructionPlane, -42.0)
         sk_p3 = paper_comp.sketches.add(pl_p3)
         sk_p3.sketchCurves.sketchLines.addTwoPointRectangle(
-            w2s(sk_p3, -105.0, -284.0, -42.0),
-            w2s(sk_p3, 105.0, -134.0, -42.0)
+            w2s(sk_p3, -148.5, -284.0, -42.0),
+            w2s(sk_p3, 148.5, -134.0, -42.0)
         )
-        ext_p3 = extrude_profile(paper_comp, sk_p3.profiles.item(0), 0.8)
+        for px in punch_x_coords:
+            sk_p3.sketchCurves.sketchCircles.addByCenterRadius(
+                w2s(sk_p3, px, -144.0, -42.0), mm(3.2)
+            )
+        p3_prof = get_profile_with_loops(sk_p3, 5)
+        ext_p3 = extrude_profile(paper_comp, p3_prof, 0.8)
         p3_body = ext_p3.bodies.item(0)
         p3_body.name = 'Stage3_Lower_Tray_Punched_Sheet'
         apply_color(p3_body, col_paper)
-
-        sk_p3_holes = paper_comp.sketches.add(pl_p3)
-        for px in punch_x_coords:
-            sk_p3_holes.sketchCurves.sketchCircles.addByCenterRadius(
-                w2s(sk_p3_holes, px, -142.0, -42.0), mm(3.2)
-            )
-        for i in range(sk_p3_holes.profiles.count):
-            extrude_profile(paper_comp, sk_p3_holes.profiles.item(i), 2.0, adsk.fusion.FeatureOperations.CutFeatureOperation)
 
         # =====================================================================
         # 10. LATERAL LEAD-SCREW STEPPER DRIVE (Left Frame Side)
@@ -638,7 +634,6 @@ def run(context):
         # =====================================================================
         # 11A & 11B. CAM PUNCH STEPPER MOTOR STATOR & SPINNING ROTOR/PINION GEAR
         # =====================================================================
-        # Distance from Motor (Y=18.0, Z=25.0) to Off-Center Shaft (Y=0.0, Z=49.0) is sqrt(18^2 + 24^2) = 30.0 mm exact!
         Y_CAM_MOTOR = 18.0
         Z_CAM_MOTOR = 25.0
 
@@ -677,120 +672,8 @@ def run(context):
         add_cyl_x(sol_comp, 205.0, 18.0, -82.0, 4.0, 9.0, 'Diverter_Rotary_Solenoid_Body', col_coupler_blue)
         add_cyl_x(sol_comp, 223.0, 3.0, -82.0, 4.0, 5.0, 'Solenoid_Armature_Hub', col_steel)
 
-        # =====================================================================
-        # 14. AS-BUILT JOINTS & KINEMATIC LINKAGES
-        # =====================================================================
-        ab_joints = root.asBuiltJoints
-
-        # Lock stationary sub-components onto the Sliding Carriage (03)
-        rg_carriage = root.rigidGroups.createInput(
-            adsk.core.ObjectCollection.createWithArray([slide_occ, check_occ, cam_stator_occ]),
-            True
-        )
-        root.rigidGroups.add(rg_carriage).name = 'Carriage_Rigid_Group'
-
-        # Joint 1: Lateral Slider Joint on Punch Carriage (along X-axis)
-        cp_slide = add_point(slide_comp, 0.0, 0.0, 0.0, 'Carriage_Slider_Anchor')
-        geo_slide = adsk.fusion.JointGeometry.createByPoint(cp_slide.createForAssemblyContext(slide_occ))
-        ab_slide_in = ab_joints.createInput(slide_occ, base_occ, geo_slide)
-        ab_slide_in.setAsSliderJointMotion(adsk.fusion.JointDirections.XAxisJointDirection)
-        j_slide = ab_joints.add(ab_slide_in)
-        j_slide.name = '01_Side_Misalignment_Slider'
-        j_slide.jointMotion.slideLimits.isMinimumValueEnabled = True
-        j_slide.jointMotion.slideLimits.minimumValue = mm(-25.0)
-        j_slide.jointMotion.slideLimits.isMaximumValueEnabled = True
-        j_slide.jointMotion.slideLimits.maximumValue = mm(25.0)
-
-        # Joint 2: Revolute Joint on Stepper Motor Rotor & 14T Pinion Gear around (Y=18, Z=25)
-        cp_motor = add_point(cam_rotor_comp, 173.0, Y_CAM_MOTOR, Z_CAM_MOTOR, 'Cam_Motor_Axis_Point')
-        geo_motor = adsk.fusion.JointGeometry.createByPoint(cp_motor.createForAssemblyContext(cam_rotor_occ))
-        ab_motor_in = ab_joints.createInput(cam_rotor_occ, slide_occ, geo_motor)
-        ab_motor_in.setAsRevoluteJointMotion(adsk.fusion.JointDirections.XAxisJointDirection)
-        j_motor_rev = ab_joints.add(ab_motor_in)
-        j_motor_rev.name = '02_Cam_Stepper_Motor_Revolute'
-
-        # Joint 3: Revolute Joint on Off-Center Drive Shaft & 4 Stepped Eccentric Rotors around (Y=0, Z=49)
-        cp_cam = add_point(cam_comp, 40.0, 0.0, Z_SHAFT, 'OffCenter_Shaft_Axis_Point')
-        geo_cam = adsk.fusion.JointGeometry.createByPoint(cp_cam.createForAssemblyContext(cam_occ))
-        ab_cam_in = ab_joints.createInput(cam_occ, slide_occ, geo_cam)
-        ab_cam_in.setAsRevoluteJointMotion(adsk.fusion.JointDirections.XAxisJointDirection)
-        j_cam_rev = ab_joints.add(ab_cam_in)
-        j_cam_rev.name = '03_OffCenter_Cam_Shaft_Revolute'
-
-        # Joint 4: Vertical Slider Joint on the 4 Silver Punch Pins (along Z-axis)
-        cp_pins = add_point(pins_comp, 40.0, 0.0, 20.0, 'Punch_Pin_Slider_Point')
-        geo_pins = adsk.fusion.JointGeometry.createByPoint(cp_pins.createForAssemblyContext(pins_occ))
-        ab_pins_in = ab_joints.createInput(pins_occ, slide_occ, geo_pins)
-        ab_pins_in.setAsSliderJointMotion(adsk.fusion.JointDirections.ZAxisJointDirection)
-        j_pins_slide = ab_joints.add(ab_pins_in)
-        j_pins_slide.name = '04_Punch_Pins_Vertical_Slider'
-
-        # Joint 5: Revolute Joint on the 4 Outer Clevis Straps around the Wrist Pin (Y=0, Z=34) on the Punch Pins
-        cp_strap = add_point(strap_comp, 40.0, 0.0, Z_WRIST_TDC, 'Clevis_Wrist_Pin_Pivot')
-        geo_strap = adsk.fusion.JointGeometry.createByPoint(cp_strap.createForAssemblyContext(strap_occ))
-        ab_strap_in = ab_joints.createInput(strap_occ, pins_occ, geo_strap)
-        ab_strap_in.setAsRevoluteJointMotion(adsk.fusion.JointDirections.XAxisJointDirection)
-        j_strap_rev = ab_joints.add(ab_strap_in)
-        j_strap_rev.name = '05_Clevis_Strap_WristPin_Revolute'
-
-        # Focus Camera onto the Blue Highlighted Punch Bit (Station 3 at X = +40 mm) & Motor Gears
-        vp = app.activeViewport
-        cam = vp.camera
-        cam.eye = adsk.core.Point3D.create(mm(145.0), mm(-115.0), mm(82.0))
-        cam.target = adsk.core.Point3D.create(mm(55.0), mm(0.0), mm(34.0))
-        cam.upVector = adsk.core.Vector3D.create(0, 0, 1)
-        cam.isFitView = False
-        vp.camera = cam
-        vp.refresh()
-
-        ui.messageBox(
-            'Off-Center Eccentric Cam & Clevis-Strap Punch Mechanism Built!\n\n'
-            'Click OK to watch the live 3D animation (2 full punch cycles):\n'
-            '• Stepper Motor & 14T Pinion spin the 28T Bull Gear & Off-Center Shaft.\n'
-            '• Stepped Eccentric Rotor orbits inside the Blue Clevis Strap.\n'
-            '• Clevis Strap rocks on the Wrist Pin while driving the Silver Punch Pin down through the Chrome Guide Block!'
-        )
-
-        # =====================================================================
-        # 15. LIVE KINEMATIC ANIMATION (2 Full Punch Cycles = 720 Degrees)
-        # =====================================================================
-        rev_motor_motion = adsk.fusion.RevoluteJointMotion.cast(j_motor_rev.jointMotion)
-        rev_cam_motion = adsk.fusion.RevoluteJointMotion.cast(j_cam_rev.jointMotion)
-        slide_pins_motion = adsk.fusion.SliderJointMotion.cast(j_pins_slide.jointMotion)
-        rev_strap_motion = adsk.fusion.RevoluteJointMotion.cast(j_strap_rev.jointMotion)
-
-        total_steps = 90  # 2 revolutions at 8 degrees per step
-        for step in range(total_steps + 1):
-            theta = (step / total_steps) * (4.0 * math.pi)
-
-            # Exact Slider-Crank Kinematics for the Off-Center Eccentric Cam & Clevis Strap:
-            # 1) Vertical displacement of Punch Pin & Wrist Pin (in mm):
-            dz_mm = ECCENTRICITY * (math.cos(theta) - 1.0) + (L_STRAP - math.sqrt(L_STRAP**2 - (ECCENTRICITY * math.sin(theta))**2))
-
-            # 2) Rocking angle phi (in radians) of the Outer Clevis Strap on the Wrist Pin:
-            phi_rad = math.asin((ECCENTRICITY / L_STRAP) * math.sin(theta))
-
-            # Apply synchronized motion to all 4 joints:
-            rev_motor_motion.rotationValue = -2.0 * theta   # 2:1 gear ratio
-            rev_cam_motion.rotationValue = theta            # Off-center shaft & eccentric rotor rotation
-            slide_pins_motion.slideValue = mm(dz_mm)        # Vertical punch stroke (0 to -8.0 mm)
-            rev_strap_motion.rotationValue = phi_rad        # Clevis strap rocking on wrist pin
-
-            adsk.doEvents()
-            vp.refresh()
-            time.sleep(0.02)
-
-        # Add persistent Motion Link between Stepper Motor Pinion and Cam Shaft Bull Gear (2:1)
-        try:
-            mlinks = root.motionLinks
-            ml_in = mlinks.createInput(j_cam_rev, j_motor_rev)
-            ml_in.valueOne = adsk.core.ValueInput.createByReal(math.pi)
-            ml_in.valueTwo = adsk.core.ValueInput.createByReal(-2.0 * math.pi)
-            ml = mlinks.add(ml_in)
-            ml.name = 'Motor_2to1_Gear_MotionLink'
-        except:
-            pass
-
     except:
         if ui:
             ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
+
+        # =====================================================================
